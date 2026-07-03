@@ -1,30 +1,49 @@
 import json
 import os
+import re
 import tempfile
 import traceback
 from pathlib import Path
-import json
-import re
+
 import streamlit as st
 
-from pipeline import analyze_articles, analyze_kpi, explain, generate_hypothesis, review, find_patterns
+from pipeline import analyze_articles, analyze_kpi, explain, find_patterns, generate_hypothesis, review
 from reader import read_file
 
 
 SUPPORTED_EXTENSIONS = {".pdf", ".xlsx", ".xls"}
 DEFAULT_DEBUG = os.getenv("STREAMLIT_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
-
+SESSION_DEFAULTS = {
+    "debug_enabled": DEFAULT_DEBUG,
+    "structured_kpi": "",
+    "literature_analysis": "",
+    "patterns": "",
+    "hypotheses": "",
+    "critique": "",
+    "final_report": "",
+    "file_statuses": [],
+    "stage_outputs_preview": {},
+    "errors": "",
+    "traceback": "",
+    "completed_stages": [],
+    "debug_prompt": "",
+    "debug_constraints": "",
+    "debug_file_list": [],
+    "debug_file_text_lengths": {},
+    "literature_context_length": 0,
+    "debug_literature_context_preview": "",
+    "generation_in_progress": False,
+}
 
 
 def split_hypotheses(text):
-
     parts = re.split(r"(?=Гипотеза\s+\d+:)", text)
-
     return [p.strip() for p in parts if p.strip()]
+
 
 def render_hypotheses(text: str):
     # Делим текст по заголовкам "Гипотеза N"
-    parts = re.split(r'(?=\*\*Гипотеза\s+\d+:)', text)
+    parts = re.split(r"(?=\*\*Гипотеза\s+\d+:)", text)
 
     for part in parts:
         part = part.strip()
@@ -36,6 +55,7 @@ def render_hypotheses(text: str):
 
         with st.expander(title, expanded=False):
             st.markdown(part)
+
 
 def extract_response_text(response):
     value = getattr(response, "output_text", "")
@@ -81,10 +101,8 @@ def parse_json_like(value):
 
 
 def split_into_chunks(text: str, chunk_size: int = 12000):
-    return [
-        text[i:i + chunk_size]
-        for i in range(0, len(text), chunk_size)
-    ]
+    return [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
+
 
 def render_content(content):
     parsed = parse_json_like(content)
@@ -121,6 +139,94 @@ def ensure_non_empty(stage_name, value):
     if value and value.strip():
         return value
     raise RuntimeError(f"Этап '{stage_name}' вернул пустой ответ.")
+
+
+def initialize_session_state():
+    for key, value in SESSION_DEFAULTS.items():
+        if key not in st.session_state:
+            st.session_state[key] = value.copy() if isinstance(value, (dict, list)) else value
+
+
+def clear_generation_results():
+    for key in [
+        "structured_kpi",
+        "literature_analysis",
+        "patterns",
+        "hypotheses",
+        "critique",
+        "final_report",
+        "file_statuses",
+        "stage_outputs_preview",
+        "errors",
+        "traceback",
+        "completed_stages",
+        "debug_prompt",
+        "debug_constraints",
+        "debug_file_list",
+        "debug_file_text_lengths",
+        "literature_context_length",
+        "debug_literature_context_preview",
+    ]:
+        value = SESSION_DEFAULTS[key]
+        st.session_state[key] = value.copy() if isinstance(value, (dict, list)) else value
+    st.session_state.generation_in_progress = False
+
+
+def persist_stage_output(stage_key, value):
+    st.session_state.completed_stages = list(dict.fromkeys([*st.session_state.completed_stages, stage_key]))
+    st.session_state.stage_outputs_preview[stage_key] = {
+        "length": len(value),
+        "preview": preview_text(value, 800),
+    }
+
+
+def render_saved_results():
+    if st.session_state.file_statuses:
+        with st.expander("Загруженные файлы и статус чтения", expanded=True):
+            for item in st.session_state.file_statuses:
+                st.write(
+                    f"{item['name']} | {item['type']} | {item['message']} | "
+                    f"объём текста: {item['text_length']}"
+                )
+
+    if st.session_state.structured_kpi:
+        render_block("Структурированный KPI", st.session_state.structured_kpi)
+    if st.session_state.literature_analysis:
+        render_block("Анализ литературы", st.session_state.literature_analysis)
+    if st.session_state.patterns:
+        render_block("Паттерны", st.session_state.patterns)
+    if st.session_state.hypotheses:
+        render_block("Гипотезы", st.session_state.hypotheses)
+    if st.session_state.critique:
+        render_block("Критика", st.session_state.critique)
+    if st.session_state.final_report:
+        st.subheader("Итоговый отчёт")
+        render_hypotheses(st.session_state.final_report)
+
+    debug_enabled = st.session_state.debug_enabled
+    debug_panel(debug_enabled, "Итог чтения файлов", st.session_state.file_statuses, expanded=True)
+    debug_panel(
+        debug_enabled,
+        "Объединённый literature_context",
+        st.session_state.debug_literature_context_preview,
+    )
+    debug_panel(debug_enabled, "Собранный prompt", st.session_state.debug_prompt, expanded=True)
+    debug_panel(
+        debug_enabled,
+        "Состояние этапов",
+        {
+            "constraints": st.session_state.debug_constraints,
+            "file_list": st.session_state.debug_file_list,
+            "file_text_lengths": st.session_state.debug_file_text_lengths,
+            "literature_context_length": st.session_state.literature_context_length,
+            "completed_stages": st.session_state.completed_stages,
+            "stage_outputs_preview": st.session_state.stage_outputs_preview,
+            "errors": st.session_state.errors,
+        },
+        expanded=bool(st.session_state.completed_stages or st.session_state.errors),
+    )
+    if st.session_state.traceback:
+        debug_panel(debug_enabled, "Traceback", st.session_state.traceback, expanded=True)
 
 
 def process_uploaded_files(uploaded_files):
@@ -192,11 +298,18 @@ def process_uploaded_files(uploaded_files):
 
 def main():
     st.set_page_config(page_title="Фабрика гипотез", layout="wide")
+    initialize_session_state()
     st.title("Фабрика гипотез")
 
     with st.sidebar:
-        debug_enabled = st.toggle("Режим отладки", value=DEFAULT_DEBUG)
+        debug_enabled = st.toggle(
+            "Режим отладки",
+            value=st.session_state.get("debug_enabled", DEFAULT_DEBUG),
+        )
+        st.session_state.debug_enabled = debug_enabled
         st.caption("Показывает входы, выходы и стек ошибок. Можно отключить в любой момент.")
+        if st.button("Очистить результаты"):
+            clear_generation_results()
 
     uploaded_files = st.file_uploader(
         "Загрузите PDF или Excel файлы",
@@ -206,147 +319,118 @@ def main():
     kpi_problem = st.text_area("KPI / технологическая проблема", height=150)
     constraints = st.text_area("Ограничения", height=120)
 
-    if st.button("Сгенерировать гипотезы", type="primary"):
-        if not uploaded_files:
-            st.warning("Загрузите хотя бы один PDF или Excel файл.")
-            return
+    render_saved_results()
 
-        file_results, literature_context = process_uploaded_files(uploaded_files)
+    if not st.button("Сгенерировать гипотезы", type="primary"):
+        return
 
-        with st.expander("Загруженные файлы и статус чтения", expanded=True):
-            for item in file_results:
-                st.write(
-                    f"{item['name']} | {item['type']} | {item['message']} | "
-                    f"объём текста: {item['text_length']}"
-                )
+    if not uploaded_files:
+        st.warning("Загрузите хотя бы один PDF или Excel файл.")
+        return
 
-        debug_panel(debug_enabled, "Итог чтения файлов", file_results, expanded=True)
-        debug_panel(
-            debug_enabled,
-            "Объединённый literature_context",
-            preview_text(literature_context),
+    clear_generation_results()
+    st.session_state.generation_in_progress = True
+    st.session_state.debug_constraints = constraints.strip()
+    st.session_state.debug_file_list = [uploaded_file.name for uploaded_file in uploaded_files]
+
+    file_results, literature_context = process_uploaded_files(uploaded_files)
+    st.session_state.file_statuses = file_results
+    st.session_state.debug_file_text_lengths = {
+        item["name"]: item["text_length"] for item in file_results
+    }
+    st.session_state.literature_context_length = len(literature_context)
+    st.session_state.debug_literature_context_preview = preview_text(literature_context)
+
+    if not literature_context.strip():
+        st.session_state.errors = "Не удалось прочитать ни один файл."
+        st.session_state.generation_in_progress = False
+        render_saved_results()
+        st.error("Не удалось прочитать ни один файл. Пайплайн не был запущен.")
+        return
+
+    prompt = f"{kpi_problem.strip()}\n\nОграничения:\n{constraints.strip()}".strip()
+    st.session_state.debug_prompt = prompt
+
+    if not kpi_problem.strip():
+        st.session_state.errors = "KPI / технологическая проблема не заполнена."
+        st.session_state.generation_in_progress = False
+        st.warning("Заполните поле KPI / технологическая проблема.")
+        return
+
+    try:
+        with st.spinner("Выполняется анализ..."):
+            structured_kpi = analyze_kpi(prompt)
+            structured_kpi_text = ensure_non_empty(
+                "analyze_kpi",
+                extract_response_text(structured_kpi),
+            )
+            st.session_state.structured_kpi = structured_kpi_text
+            persist_stage_output("analyze_kpi", structured_kpi_text)
+
+            chunks = split_into_chunks(literature_context, 50000)
+            all_results = []
+            progress = st.progress(0)
+
+            for index, chunk in enumerate(chunks):
+                result = analyze_articles(structured_kpi_text, chunk)
+                text = extract_response_text(result)
+                if text:
+                    all_results.append(text)
+                progress.progress((index + 1) / len(chunks))
+
+            literature_analysis_text = ensure_non_empty(
+                "analyze_articles",
+                "\n".join(all_results),
+            )
+            st.session_state.literature_analysis = literature_analysis_text
+            persist_stage_output("analyze_articles", literature_analysis_text)
+
+            patterns = find_patterns(literature_analysis_text)
+            patterns_text = ensure_non_empty(
+                "patterns_text",
+                extract_response_text(patterns),
+            )
+            st.session_state.patterns = patterns_text
+            persist_stage_output("patterns_text", patterns_text)
+
+            hypotheses = generate_hypothesis(structured_kpi_text, literature_analysis_text, patterns_text)
+            hypotheses_text = ensure_non_empty(
+                "generate_hypothesis",
+                extract_response_text(hypotheses),
+            )
+            st.session_state.hypotheses = hypotheses_text
+            persist_stage_output("generate_hypothesis", hypotheses_text)
+
+            critique = review(hypotheses_text, prompt)
+            critique_text = ensure_non_empty(
+                "review",
+                extract_response_text(critique),
+            )
+            st.session_state.critique = critique_text
+            persist_stage_output("review", critique_text)
+
+            final_output = explain(critique_text)
+            final_output_text = ensure_non_empty(
+                "explain",
+                extract_response_text(final_output),
+            )
+            st.session_state.final_report = final_output_text
+            persist_stage_output("explain", final_output_text)
+            st.session_state.errors = ""
+            st.session_state.traceback = ""
+    except Exception as exc:
+        st.session_state.errors = str(exc)
+        st.session_state.traceback = traceback.format_exc()
+        st.session_state.generation_in_progress = False
+        render_saved_results()
+        st.error(
+            "Ошибка при обращении к модели или обработке данных. "
+            f"Подробности: {exc}"
         )
+        return
 
-        if not literature_context.strip():
-            st.error("Не удалось прочитать ни один файл. Пайплайн не был запущен.")
-            return
-
-        prompt = f"{kpi_problem.strip()}\n\nОграничения:\n{constraints.strip()}".strip()
-        debug_panel(debug_enabled, "Собранный prompt", prompt, expanded=True)
-
-        if not kpi_problem.strip():
-            st.warning("Заполните поле KPI / технологическая проблема.")
-            return
-
-        stage_outputs = {}
-
-        try:
-            with st.spinner("Выполняется анализ..."):
-                structured_kpi = analyze_kpi(prompt)
-                structured_kpi_text = ensure_non_empty(
-                    "analyze_kpi",
-                    extract_response_text(structured_kpi),
-                )
-                stage_outputs["analyze_kpi"] = structured_kpi_text
-                # literature_context = literature_context[:50000]
-                chunks = split_into_chunks(literature_context, 50000)
-
-                all_results = []
-
-                progress = st.progress(0)
-
-                for i, chunk in enumerate(chunks):
-
-                    result = analyze_articles(
-                        structured_kpi_text,
-                        chunk,
-                    )
-
-                    text = extract_response_text(result)
-
-                    if text:
-                        all_results.append(text)
-
-                    progress.progress((i + 1) / len(chunks))
-
-                literature_analysis_text = "\n".join(all_results)
-
-                literature_analysis_text = ensure_non_empty(
-                    "analyze_articles",
-                    literature_analysis_text,
-                )
-                stage_outputs["analyze_articles"] = literature_analysis_text
-                patterns = find_patterns(literature_analysis_text)
-                patterns_text = ensure_non_empty(
-                    "patterns_text",
-                    extract_response_text(patterns),
-                )
-                stage_outputs["patterns_text"] = patterns_text
-                hypotheses = generate_hypothesis(structured_kpi_text, literature_analysis_text, patterns_text)
-                hypotheses_text = ensure_non_empty(
-                    "generate_hypothesis",
-                    extract_response_text(hypotheses),
-                )
-                stage_outputs["generate_hypothesis"] = hypotheses_text
-
-                critique = review(hypotheses_text, prompt)
-                critique_text = ensure_non_empty(
-                    "review",
-                    extract_response_text(critique),
-                )
-                stage_outputs["review"] = critique_text
-
-                final_output = explain(critique_text)
-                final_output_text = ensure_non_empty(
-                    "explain",
-                    extract_response_text(final_output),
-                )
-                stage_outputs["explain"] = final_output_text
-        except Exception as exc:
-            st.error(
-                "Ошибка при обращении к модели или обработке данных. "
-                f"Подробности: {exc}"
-            )
-            debug_panel(
-                debug_enabled,
-                "Состояние этапов до ошибки",
-                {
-                    "prompt_length": len(prompt),
-                    "literature_context_length": len(literature_context),
-                    "completed_stages": list(stage_outputs.keys()),
-                    "stage_outputs_preview": {
-                        key: preview_text(value, 800) for key, value in stage_outputs.items()
-                    },
-                },
-                expanded=True,
-            )
-            debug_panel(
-                debug_enabled,
-                "Traceback",
-                traceback.format_exc(),
-                expanded=True,
-            )
-            return
-
-        debug_panel(
-            debug_enabled,
-            "Выходы этапов пайплайна",
-            {
-                key: {
-                    "length": len(value),
-                    "preview": preview_text(value, 800),
-                }
-                for key, value in stage_outputs.items()
-            },
-        )
-
-        render_block("Структурированный KPI", structured_kpi_text)
-        render_block("Анализ литературы", literature_analysis_text)
-        render_block("Гипотезы", hypotheses_text)
-        render_block("Критика", critique_text)
-        st.subheader("Итоговый отчёт")
-        render_hypotheses(final_output_text)
-
+    st.session_state.generation_in_progress = False
+    render_saved_results()
 
 
 if __name__ == "__main__":
