@@ -467,7 +467,14 @@ def main():
         )
         return
     finally:
+        should_rerun = (
+            st.session_state.get("is_generating", False)
+            or st.session_state.get("generation_requested", False)
+        )
         st.session_state.is_generating = False
+        st.session_state.generation_requested = False
+        if should_rerun:
+            st.rerun()
 
     render_saved_results()
 
