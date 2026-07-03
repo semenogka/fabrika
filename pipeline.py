@@ -22,7 +22,7 @@ def analyze_kpi(kpi):
 
 def analyze_articles(parsed, text):
     return client.responses.create(
-        model=_model_uri(QWEN_MODEL),
+        model=_model_uri(DEEPSEEK_MODEL),
         temperature=0.3,
         instructions=LITERATURE_SYSTEM,
         input=f"{parsed}\n\n{text}",

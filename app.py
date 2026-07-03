@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import traceback
 from pathlib import Path
 
 import streamlit as st
@@ -10,10 +11,14 @@ from reader import read_file
 
 
 SUPPORTED_EXTENSIONS = {".pdf", ".xlsx", ".xls"}
+DEFAULT_DEBUG = os.getenv("STREAMLIT_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def extract_response_text(response):
-    return getattr(response, "output_text", str(response))
+    value = getattr(response, "output_text", "")
+    if isinstance(value, str):
+        return value.strip()
+    return str(value).strip()
 
 
 def parse_json_like(value):
@@ -21,6 +26,9 @@ def parse_json_like(value):
         return None
 
     stripped = value.strip()
+    if not stripped:
+        return None
+
     candidates = [stripped]
 
     if "```json" in stripped:
@@ -49,13 +57,41 @@ def parse_json_like(value):
     return None
 
 
+def render_content(content):
+    parsed = parse_json_like(content)
+    if parsed is not None:
+        st.json(parsed)
+    else:
+        st.text(content if isinstance(content, str) else str(content))
+
+
 def render_block(title, content):
     with st.expander(title, expanded=False):
-        parsed = parse_json_like(content)
-        if parsed is not None:
-            st.json(parsed)
+        render_content(content)
+
+
+def preview_text(text, limit=1500):
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}\n\n... [truncated, total length: {len(text)}]"
+
+
+def debug_panel(debug_enabled, title, payload, expanded=False):
+    if not debug_enabled:
+        return
+    with st.expander(f"DEBUG: {title}", expanded=expanded):
+        if isinstance(payload, (dict, list)):
+            st.json(payload)
         else:
-            st.text(content if isinstance(content, str) else str(content))
+            st.text(str(payload))
+
+
+def ensure_non_empty(stage_name, value):
+    if value and value.strip():
+        return value
+    raise RuntimeError(f"Этап '{stage_name}' вернул пустой ответ.")
 
 
 def process_uploaded_files(uploaded_files):
@@ -88,9 +124,7 @@ def process_uploaded_files(uploaded_files):
             extracted_text = extracted_text.strip()
 
             if extracted_text:
-                literature_parts.append(
-                    f"=== FILE: {uploaded_file.name} ===\n{extracted_text}"
-                )
+                literature_parts.append(f"=== FILE: {uploaded_file.name} ===\n{extracted_text}")
                 results.append(
                     {
                         "name": uploaded_file.name,
@@ -131,6 +165,10 @@ def main():
     st.set_page_config(page_title="Фабрика гипотез", layout="wide")
     st.title("Фабрика гипотез")
 
+    with st.sidebar:
+        debug_enabled = st.toggle("Режим отладки", value=DEFAULT_DEBUG)
+        st.caption("Показывает входы, выходы и стек ошибок. Можно отключить в любой момент.")
+
     uploaded_files = st.file_uploader(
         "Загрузите PDF или Excel файлы",
         type=["pdf", "xlsx", "xls"],
@@ -153,41 +191,102 @@ def main():
                     f"объём текста: {item['text_length']}"
                 )
 
+        debug_panel(debug_enabled, "Итог чтения файлов", file_results, expanded=True)
+        debug_panel(
+            debug_enabled,
+            "Объединённый literature_context",
+            preview_text(literature_context),
+        )
+
         if not literature_context.strip():
             st.error("Не удалось прочитать ни один файл. Пайплайн не был запущен.")
             return
 
         prompt = f"{kpi_problem.strip()}\n\nОграничения:\n{constraints.strip()}".strip()
+        debug_panel(debug_enabled, "Собранный prompt", prompt, expanded=True)
 
-        if not prompt:
+        if not kpi_problem.strip():
             st.warning("Заполните поле KPI / технологическая проблема.")
             return
+
+        stage_outputs = {}
 
         try:
             with st.spinner("Выполняется анализ..."):
                 structured_kpi = analyze_kpi(prompt)
-                structured_kpi_text = extract_response_text(structured_kpi)
+                structured_kpi_text = ensure_non_empty(
+                    "analyze_kpi",
+                    extract_response_text(structured_kpi),
+                )
+                stage_outputs["analyze_kpi"] = structured_kpi_text
 
                 literature_analysis = analyze_articles(
                     structured_kpi_text,
                     literature_context,
                 )
-                literature_analysis_text = extract_response_text(literature_analysis)
+                literature_analysis_text = ensure_non_empty(
+                    "analyze_articles",
+                    extract_response_text(literature_analysis),
+                )
+                stage_outputs["analyze_articles"] = literature_analysis_text
 
                 hypotheses = generate_hypothesis(literature_analysis_text)
-                hypotheses_text = extract_response_text(hypotheses)
+                hypotheses_text = ensure_non_empty(
+                    "generate_hypothesis",
+                    extract_response_text(hypotheses),
+                )
+                stage_outputs["generate_hypothesis"] = hypotheses_text
 
                 critique = review(hypotheses_text)
-                critique_text = extract_response_text(critique)
+                critique_text = ensure_non_empty(
+                    "review",
+                    extract_response_text(critique),
+                )
+                stage_outputs["review"] = critique_text
 
                 final_output = explain(critique_text)
-                final_output_text = extract_response_text(final_output)
+                final_output_text = ensure_non_empty(
+                    "explain",
+                    extract_response_text(final_output),
+                )
+                stage_outputs["explain"] = final_output_text
         except Exception as exc:
             st.error(
                 "Ошибка при обращении к модели или обработке данных. "
                 f"Подробности: {exc}"
             )
+            debug_panel(
+                debug_enabled,
+                "Состояние этапов до ошибки",
+                {
+                    "prompt_length": len(prompt),
+                    "literature_context_length": len(literature_context),
+                    "completed_stages": list(stage_outputs.keys()),
+                    "stage_outputs_preview": {
+                        key: preview_text(value, 800) for key, value in stage_outputs.items()
+                    },
+                },
+                expanded=True,
+            )
+            debug_panel(
+                debug_enabled,
+                "Traceback",
+                traceback.format_exc(),
+                expanded=True,
+            )
             return
+
+        debug_panel(
+            debug_enabled,
+            "Выходы этапов пайплайна",
+            {
+                key: {
+                    "length": len(value),
+                    "preview": preview_text(value, 800),
+                }
+                for key, value in stage_outputs.items()
+            },
+        )
 
         render_block("Структурированный KPI", structured_kpi_text)
         render_block("Анализ литературы", literature_analysis_text)
