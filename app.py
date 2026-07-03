@@ -311,21 +311,35 @@ def main():
     is_generating = st.session_state.get("is_generating", False)
 
     with st.sidebar:
+        debug_enabled = st.session_state.get("debug_enabled", DEFAULT_DEBUG)
         if is_generating:
             st.toggle(
                 "Режим отладки",
-                value=st.session_state.get("debug_enabled", DEFAULT_DEBUG),
+                value=debug_enabled,
                 disabled=True,
             )
-            st.caption("Во время генерации режим отладки заблокирован. Debug-данные сохраняются.")
+            debug_hint = (
+                "Генерация выполняется. Режим отладки временно заблокирован, "
+                "чтобы не прервать процесс. Debug-данные всё равно сохраняются."
+            )
         else:
             debug_enabled = st.toggle(
                 "Режим отладки",
-                value=st.session_state.get("debug_enabled", DEFAULT_DEBUG),
+                value=debug_enabled,
             )
             st.session_state.debug_enabled = debug_enabled
+            if debug_enabled:
+                debug_hint = (
+                    "Режим отладки включён: отображаются входы, выходы, статусы этапов "
+                    "и ошибки. Можно выключить после завершения генерации."
+                )
+            else:
+                debug_hint = (
+                    "Режим отладки выключен: debug-данные скрыты, но будут сохраняться "
+                    "при генерации и доступны после включения."
+                )
 
-        st.caption("Показывает входы, выходы и стек ошибок. Можно отключить в любой момент.")
+        st.caption(debug_hint)
         if st.button("Очистить результаты", disabled=is_generating):
             clear_generation_results()
 
