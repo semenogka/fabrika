@@ -1,4 +1,4 @@
-from pipeline import analyze_articles, analyze_kpi, explain, generate_hypothesis, review
+from pipeline import analyze_articles, analyze_kpi, explain, generate_hypothesis, review, find_patterns
 from reader import read_file
 
 
@@ -17,7 +17,8 @@ if __name__ == "__main__":
     print(knowledge.output_text)
 
     if knowledge.output_text:
-        hypothesis = generate_hypothesis(knowledge.output_text)
+        patterns = find_patterns(knowledge.output_text)
+        hypothesis = generate_hypothesis(parsed, knowledge.output_text, patterns.output_text)
         reviewed = review(hypothesis.output_text)
         result = explain(reviewed.output_text)
         print(result.output_text)

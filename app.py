@@ -3,16 +3,39 @@ import os
 import tempfile
 import traceback
 from pathlib import Path
-
+import json
+import re
 import streamlit as st
 
-from pipeline import analyze_articles, analyze_kpi, explain, generate_hypothesis, review
+from pipeline import analyze_articles, analyze_kpi, explain, generate_hypothesis, review, find_patterns
 from reader import read_file
 
 
 SUPPORTED_EXTENSIONS = {".pdf", ".xlsx", ".xls"}
 DEFAULT_DEBUG = os.getenv("STREAMLIT_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
 
+
+
+def split_hypotheses(text):
+
+    parts = re.split(r"(?=Гипотеза\s+\d+:)", text)
+
+    return [p.strip() for p in parts if p.strip()]
+
+def render_hypotheses(text: str):
+    # Делим текст по заголовкам "Гипотеза N"
+    parts = re.split(r'(?=\*\*Гипотеза\s+\d+:)', text)
+
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+
+        first_line = part.split("\n", 1)[0]
+        title = re.sub(r"\*\*", "", first_line)
+
+        with st.expander(title, expanded=False):
+            st.markdown(part)
 
 def extract_response_text(response):
     value = getattr(response, "output_text", "")
@@ -56,6 +79,12 @@ def parse_json_like(value):
 
     return None
 
+
+def split_into_chunks(text: str, chunk_size: int = 12000):
+    return [
+        text[i:i + chunk_size]
+        for i in range(0, len(text), chunk_size)
+    ]
 
 def render_content(content):
     parsed = parse_json_like(content)
@@ -219,25 +248,48 @@ def main():
                     extract_response_text(structured_kpi),
                 )
                 stage_outputs["analyze_kpi"] = structured_kpi_text
+                # literature_context = literature_context[:50000]
+                chunks = split_into_chunks(literature_context, 50000)
 
-                literature_analysis = analyze_articles(
-                    structured_kpi_text,
-                    literature_context,
-                )
+                all_results = []
+
+                progress = st.progress(0)
+
+                for i, chunk in enumerate(chunks):
+
+                    result = analyze_articles(
+                        structured_kpi_text,
+                        chunk,
+                    )
+
+                    text = extract_response_text(result)
+
+                    if text:
+                        all_results.append(text)
+
+                    progress.progress((i + 1) / len(chunks))
+
+                literature_analysis_text = "\n".join(all_results)
+
                 literature_analysis_text = ensure_non_empty(
                     "analyze_articles",
-                    extract_response_text(literature_analysis),
+                    literature_analysis_text,
                 )
                 stage_outputs["analyze_articles"] = literature_analysis_text
-
-                hypotheses = generate_hypothesis(literature_analysis_text)
+                patterns = find_patterns(literature_analysis_text)
+                patterns_text = ensure_non_empty(
+                    "patterns_text",
+                    extract_response_text(patterns),
+                )
+                stage_outputs["patterns_text"] = patterns_text
+                hypotheses = generate_hypothesis(structured_kpi_text, literature_analysis_text, patterns_text)
                 hypotheses_text = ensure_non_empty(
                     "generate_hypothesis",
                     extract_response_text(hypotheses),
                 )
                 stage_outputs["generate_hypothesis"] = hypotheses_text
 
-                critique = review(hypotheses_text)
+                critique = review(hypotheses_text, prompt)
                 critique_text = ensure_non_empty(
                     "review",
                     extract_response_text(critique),
@@ -292,7 +344,9 @@ def main():
         render_block("Анализ литературы", literature_analysis_text)
         render_block("Гипотезы", hypotheses_text)
         render_block("Критика", critique_text)
-        render_block("Финальный вывод", final_output_text)
+        st.subheader("Итоговый отчёт")
+        render_hypotheses(final_output_text)
+
 
 
 if __name__ == "__main__":
