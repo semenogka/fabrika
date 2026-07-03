@@ -32,7 +32,8 @@ SESSION_DEFAULTS = {
     "debug_file_text_lengths": {},
     "literature_context_length": 0,
     "debug_literature_context_preview": "",
-    "generation_in_progress": False,
+    "is_generating": False,
+    "generation_requested": False,
 }
 
 
@@ -169,7 +170,13 @@ def clear_generation_results():
     ]:
         value = SESSION_DEFAULTS[key]
         st.session_state[key] = value.copy() if isinstance(value, (dict, list)) else value
-    st.session_state.generation_in_progress = False
+    st.session_state.is_generating = False
+    st.session_state.generation_requested = False
+
+
+def start_generation():
+    st.session_state.is_generating = True
+    st.session_state.generation_requested = True
 
 
 def persist_stage_output(stage_key, value):
@@ -301,14 +308,25 @@ def main():
     initialize_session_state()
     st.title("Фабрика гипотез")
 
+    is_generating = st.session_state.get("is_generating", False)
+
     with st.sidebar:
-        debug_enabled = st.toggle(
-            "Режим отладки",
-            value=st.session_state.get("debug_enabled", DEFAULT_DEBUG),
-        )
-        st.session_state.debug_enabled = debug_enabled
+        if is_generating:
+            st.toggle(
+                "Режим отладки",
+                value=st.session_state.get("debug_enabled", DEFAULT_DEBUG),
+                disabled=True,
+            )
+            st.caption("Во время генерации режим отладки заблокирован. Debug-данные сохраняются.")
+        else:
+            debug_enabled = st.toggle(
+                "Режим отладки",
+                value=st.session_state.get("debug_enabled", DEFAULT_DEBUG),
+            )
+            st.session_state.debug_enabled = debug_enabled
+
         st.caption("Показывает входы, выходы и стек ошибок. Можно отключить в любой момент.")
-        if st.button("Очистить результаты"):
+        if st.button("Очистить результаты", disabled=is_generating):
             clear_generation_results()
 
     uploaded_files = st.file_uploader(
@@ -321,43 +339,50 @@ def main():
 
     render_saved_results()
 
-    if not st.button("Сгенерировать гипотезы", type="primary"):
-        return
+    st.button(
+        "Сгенерировать гипотезы",
+        type="primary",
+        on_click=start_generation,
+        disabled=is_generating,
+    )
 
-    if not uploaded_files:
-        st.warning("Загрузите хотя бы один PDF или Excel файл.")
-        return
-
-    clear_generation_results()
-    st.session_state.generation_in_progress = True
-    st.session_state.debug_constraints = constraints.strip()
-    st.session_state.debug_file_list = [uploaded_file.name for uploaded_file in uploaded_files]
-
-    file_results, literature_context = process_uploaded_files(uploaded_files)
-    st.session_state.file_statuses = file_results
-    st.session_state.debug_file_text_lengths = {
-        item["name"]: item["text_length"] for item in file_results
-    }
-    st.session_state.literature_context_length = len(literature_context)
-    st.session_state.debug_literature_context_preview = preview_text(literature_context)
-
-    if not literature_context.strip():
-        st.session_state.errors = "Не удалось прочитать ни один файл."
-        st.session_state.generation_in_progress = False
-        render_saved_results()
-        st.error("Не удалось прочитать ни один файл. Пайплайн не был запущен.")
-        return
-
-    prompt = f"{kpi_problem.strip()}\n\nОграничения:\n{constraints.strip()}".strip()
-    st.session_state.debug_prompt = prompt
-
-    if not kpi_problem.strip():
-        st.session_state.errors = "KPI / технологическая проблема не заполнена."
-        st.session_state.generation_in_progress = False
-        st.warning("Заполните поле KPI / технологическая проблема.")
+    if not st.session_state.get("generation_requested", False):
         return
 
     try:
+        st.session_state.generation_requested = False
+
+        if not uploaded_files:
+            st.warning("Загрузите хотя бы один PDF или Excel файл.")
+            return
+
+        clear_generation_results()
+        st.session_state.is_generating = True
+        st.session_state.debug_constraints = constraints.strip()
+        st.session_state.debug_file_list = [uploaded_file.name for uploaded_file in uploaded_files]
+
+        file_results, literature_context = process_uploaded_files(uploaded_files)
+        st.session_state.file_statuses = file_results
+        st.session_state.debug_file_text_lengths = {
+            item["name"]: item["text_length"] for item in file_results
+        }
+        st.session_state.literature_context_length = len(literature_context)
+        st.session_state.debug_literature_context_preview = preview_text(literature_context)
+
+        if not literature_context.strip():
+            st.session_state.errors = "Не удалось прочитать ни один файл."
+            render_saved_results()
+            st.error("Не удалось прочитать ни один файл. Пайплайн не был запущен.")
+            return
+
+        prompt = f"{kpi_problem.strip()}\n\nОграничения:\n{constraints.strip()}".strip()
+        st.session_state.debug_prompt = prompt
+
+        if not kpi_problem.strip():
+            st.session_state.errors = "KPI / технологическая проблема не заполнена."
+            st.warning("Заполните поле KPI / технологическая проблема.")
+            return
+
         with st.spinner("Выполняется анализ..."):
             structured_kpi = analyze_kpi(prompt)
             structured_kpi_text = ensure_non_empty(
@@ -421,15 +446,15 @@ def main():
     except Exception as exc:
         st.session_state.errors = str(exc)
         st.session_state.traceback = traceback.format_exc()
-        st.session_state.generation_in_progress = False
         render_saved_results()
         st.error(
             "Ошибка при обращении к модели или обработке данных. "
             f"Подробности: {exc}"
         )
         return
+    finally:
+        st.session_state.is_generating = False
 
-    st.session_state.generation_in_progress = False
     render_saved_results()
 
 
