@@ -73,10 +73,127 @@ def render_hypotheses(text: str):
             st.markdown(part)
 
 
-def render_progressive_hypotheses(hypotheses):
+def _stringify_value(value):
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, dict):
+        return ", ".join(
+            f"{key}: {item}"
+            for key, item in value.items()
+            if item not in (None, "", [], {})
+        ).strip()
+    if isinstance(value, list):
+        return ", ".join(
+            part for part in (_stringify_value(item) for item in value) if part
+        ).strip()
+    return str(value).strip()
+
+
+def _render_bullet_list(items):
+    if not items:
+        st.markdown("- не указано")
+        return
+    for item in items:
+        text = _stringify_value(item)
+        if text:
+            st.markdown(f"- {text}")
+
+
+def _render_numbered_list(items):
+    if not items:
+        st.markdown("1. не указано")
+        return
+    for item in items:
+        text = _stringify_value(item)
+        if text:
+            st.markdown(f"1. {text}")
+
+
+def _render_evidence_list(evidence):
+    if not evidence:
+        st.markdown("- не указано")
+        return
+
+    rendered_any = False
+    for item in evidence:
+        if isinstance(item, dict):
+            source = _stringify_value(item.get("source")) or "источник не указан"
+            page = _stringify_value(item.get("page"))
+            reason = _stringify_value(item.get("reason"))
+            parts = [source]
+            if page:
+                parts.append(f"page {page}")
+            if reason:
+                parts.append(reason)
+            st.markdown(f"- {', '.join(parts)}")
+            rendered_any = True
+            continue
+
+        text = _stringify_value(item)
+        if text:
+            st.markdown(f"- {text}")
+            rendered_any = True
+
+    if not rendered_any:
+        st.markdown("- не указано")
+
+
+def render_hypothesis_card(hypothesis: dict, index: int):
+    title = _stringify_value(hypothesis.get("title")) or "не указано"
+
+    with st.container(border=True):
+        st.markdown(f"### Гипотеза {index}: {title}")
+
+        description = _stringify_value(hypothesis.get("description"))
+        if description:
+            st.markdown("**Описание:**")
+            st.write(description)
+
+        mechanism = _stringify_value(hypothesis.get("mechanism"))
+        if mechanism:
+            st.markdown("**Механизм:**")
+            st.write(mechanism)
+
+        reason = _stringify_value(hypothesis.get("reason"))
+        if reason:
+            st.markdown("**Почему появилась:**")
+            st.write(reason)
+
+        expected_effect = _stringify_value(hypothesis.get("expected_effect"))
+        if expected_effect:
+            st.markdown("**Ожидаемый эффект:**")
+            st.write(expected_effect)
+
+        novelty = _stringify_value(hypothesis.get("novelty"))
+        if novelty:
+            st.markdown("**Новизна:**")
+            st.write(novelty)
+
+        st.markdown("**Ресурсы:**")
+        _render_bullet_list(hypothesis.get("required_resources") or [])
+
+        st.markdown("**План проверки:**")
+        _render_numbered_list(hypothesis.get("verification_plan") or [])
+
+        st.markdown("**Источники:**")
+        _render_evidence_list(hypothesis.get("evidence") or [])
+
+        confidence = _stringify_value(hypothesis.get("confidence")) or "не указано"
+        priority = _stringify_value(hypothesis.get("priority")) or "не указано"
+        st.markdown(f"**Уверенность:** {confidence}")
+        st.markdown(f"**Приоритет:** {priority}")
+
+
+def render_progressive_hypotheses(hypotheses, debug_enabled=False):
     for index, hypothesis in enumerate(hypotheses, start=1):
-        with st.expander(f"Гипотеза {index}", expanded=False):
-            render_content(hypothesis)
+        render_hypothesis_card(hypothesis, index)
+        if debug_enabled:
+            with st.expander("DEBUG: raw hypothesis", expanded=False):
+                st.json(hypothesis)
 
 
 def extract_response_text(response):
@@ -240,6 +357,8 @@ def build_literature_entry(file_name, suffix, extracted_text):
 
 
 def render_saved_results():
+    debug_enabled = st.session_state.debug_enabled
+
     if st.session_state.file_statuses:
         with st.expander("Загруженные файлы и статус чтения", expanded=True):
             for item in st.session_state.file_statuses:
@@ -258,7 +377,10 @@ def render_saved_results():
         render_block("Паттерны", st.session_state.patterns)
     if st.session_state.progressive_hypotheses:
         st.subheader("Гипотезы")
-        render_progressive_hypotheses(st.session_state.progressive_hypotheses)
+        render_progressive_hypotheses(
+            st.session_state.progressive_hypotheses,
+            debug_enabled=debug_enabled,
+        )
     elif st.session_state.hypotheses:
         render_block("Гипотезы", st.session_state.hypotheses)
     if st.session_state.critique:
@@ -267,7 +389,6 @@ def render_saved_results():
         st.subheader("Итоговый отчёт")
         render_hypotheses(st.session_state.final_report)
 
-    debug_enabled = st.session_state.debug_enabled
     debug_panel(debug_enabled, "Итог чтения файлов", st.session_state.file_statuses, expanded=True)
     debug_panel(
         debug_enabled,
@@ -418,7 +539,9 @@ def main():
     kpi_problem = st.text_area("KPI / технологическая проблема", height=150)
     constraints = st.text_area("Ограничения", height=120)
 
-    render_saved_results()
+    saved_results_placeholder = st.empty()
+    with saved_results_placeholder.container():
+        render_saved_results()
 
     st.button(
         "Сгенерировать гипотезы",
@@ -457,7 +580,8 @@ def main():
 
         if not literature_context.strip():
             st.session_state.errors = "Нет успешно прочитанных источников"
-            render_saved_results()
+            with saved_results_placeholder.container():
+                render_saved_results()
             st.error("Нет успешно прочитанных источников")
             return
 
@@ -509,7 +633,6 @@ def main():
 
             hypothesis_status_placeholder = st.empty()
             hypothesis_progress_placeholder = st.empty()
-            progressive_hypotheses_placeholder = st.empty()
             hypothesis_progress = hypothesis_progress_placeholder.progress(0.0)
 
             for hypothesis_index in range(1, TOTAL_HYPOTHESES + 1):
@@ -558,8 +681,8 @@ def main():
                 hypothesis_progress.progress(
                     st.session_state.completed_hypothesis_count / TOTAL_HYPOTHESES
                 )
-                with progressive_hypotheses_placeholder.container():
-                    render_progressive_hypotheses(st.session_state.progressive_hypotheses)
+                with saved_results_placeholder.container():
+                    render_saved_results()
 
             hypothesis_status_placeholder.text("Генерация гипотез завершена. Выполняется рецензирование...")
             hypotheses_text = st.session_state.hypotheses
@@ -579,6 +702,8 @@ def main():
             )
             st.session_state.final_report = final_output_text
             persist_stage_output("explain", final_output_text)
+            with saved_results_placeholder.container():
+                render_saved_results()
             hypothesis_status_placeholder.empty()
             hypothesis_progress_placeholder.empty()
             st.session_state.errors = ""
@@ -586,7 +711,8 @@ def main():
     except Exception as exc:
         st.session_state.errors = st.session_state.progressive_generation_error or str(exc)
         st.session_state.traceback = traceback.format_exc()
-        render_saved_results()
+        with saved_results_placeholder.container():
+            render_saved_results()
         st.error(
             f"{st.session_state.errors}. Подробности: {exc}"
         )
@@ -601,7 +727,8 @@ def main():
         if should_rerun:
             st.rerun()
 
-    render_saved_results()
+    with saved_results_placeholder.container():
+        render_saved_results()
 
 
 if __name__ == "__main__":
