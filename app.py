@@ -7,11 +7,20 @@ from pathlib import Path
 
 import streamlit as st
 
-from pipeline import analyze_articles, analyze_kpi, explain, find_patterns, generate_hypothesis, review
+from pipeline import (
+    analyze_articles,
+    analyze_kpi,
+    explain,
+    find_patterns,
+    generate_hypothesis,
+    generate_single_hypothesis,
+    review,
+)
 from reader import read_file
 
 
 SUPPORTED_EXTENSIONS = {".pdf", ".xlsx", ".xls"}
+TOTAL_HYPOTHESES = 5
 DEFAULT_DEBUG = os.getenv("STREAMLIT_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
 SESSION_DEFAULTS = {
     "debug_enabled": DEFAULT_DEBUG,
@@ -33,6 +42,11 @@ SESSION_DEFAULTS = {
     "debug_file_errors": {},
     "literature_context_length": 0,
     "debug_literature_context_preview": "",
+    "progressive_hypotheses": [],
+    "completed_hypothesis_count": 0,
+    "current_hypothesis_index": 0,
+    "progressive_generation_error": "",
+    "debug_previous_hypotheses": [],
     "is_generating": False,
     "generation_requested": False,
 }
@@ -57,6 +71,178 @@ def render_hypotheses(text: str):
 
         with st.expander(title, expanded=False):
             st.markdown(part)
+
+
+def _stringify_value(value):
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, dict):
+        return ", ".join(
+            f"{key}: {item}"
+            for key, item in value.items()
+            if item not in (None, "", [], {})
+        ).strip()
+    if isinstance(value, list):
+        return ", ".join(
+            part for part in (_stringify_value(item) for item in value) if part
+        ).strip()
+    return str(value).strip()
+
+
+def _render_bullet_list(items):
+    if not items:
+        st.markdown("- не указано")
+        return
+    for item in items:
+        text = _stringify_value(item)
+        if text:
+            st.markdown(f"- {text}")
+
+
+def _render_numbered_list(items):
+    if not items:
+        st.markdown("1. не указано")
+        return
+    for item in items:
+        text = _stringify_value(item)
+        if text:
+            st.markdown(f"1. {text}")
+
+
+def _render_evidence_list(evidence):
+    if not evidence:
+        st.markdown("- не указано")
+        return
+
+    rendered_any = False
+    for item in evidence:
+        if isinstance(item, dict):
+            source = _stringify_value(item.get("source")) or "источник не указан"
+            page = _stringify_value(item.get("page"))
+            reason = _stringify_value(item.get("reason"))
+            parts = [source]
+            if page:
+                parts.append(f"page {page}")
+            if reason:
+                parts.append(reason)
+            st.markdown(f"- {', '.join(parts)}")
+            rendered_any = True
+            continue
+
+        text = _stringify_value(item)
+        if text:
+            st.markdown(f"- {text}")
+            rendered_any = True
+
+    if not rendered_any:
+        st.markdown("- не указано")
+
+
+def clean_hypothesis_title(title: str, index: int) -> str:
+    cleaned = _stringify_value(title)
+    if not cleaned:
+        return "не указано"
+
+    cleaned = re.sub(
+        rf"^\s*гипотеза\s*{index}\s*:\s*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    ).strip()
+    cleaned = re.sub(
+        r"^\s*гипотеза\s*\d+\s*:\s*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    prefix, separator, remainder = cleaned.partition(":")
+    if separator and remainder.strip() and str(index) in prefix:
+        cleaned = remainder.strip()
+
+    return cleaned or "не указано"
+
+
+def render_hypothesis_card(
+    hypothesis: dict,
+    index: int,
+    debug_mode: bool = False,
+    parent=None,
+):
+    clean_title = clean_hypothesis_title(hypothesis.get("title"), index)
+    label = f"Гипотеза {index}: {clean_title}"
+
+    expander_host = parent if parent is not None else st
+    with expander_host.expander(label, expanded=False):
+
+        description = _stringify_value(hypothesis.get("description"))
+        if description:
+            st.markdown("**Описание:**")
+            st.write(description)
+
+        mechanism = _stringify_value(hypothesis.get("mechanism"))
+        if mechanism:
+            st.markdown("**Механизм:**")
+            st.write(mechanism)
+
+        reason = _stringify_value(hypothesis.get("reason"))
+        if reason:
+            st.markdown("**Почему появилась:**")
+            st.write(reason)
+
+        expected_effect = _stringify_value(hypothesis.get("expected_effect"))
+        if expected_effect:
+            st.markdown("**Ожидаемый эффект:**")
+            st.write(expected_effect)
+
+        novelty = _stringify_value(hypothesis.get("novelty"))
+        if novelty:
+            st.markdown("**Новизна:**")
+            st.write(novelty)
+
+        st.markdown("**Ресурсы:**")
+        _render_bullet_list(hypothesis.get("required_resources") or [])
+
+        st.markdown("**План проверки:**")
+        _render_numbered_list(hypothesis.get("verification_plan") or [])
+
+        st.markdown("**Источники:**")
+        _render_evidence_list(hypothesis.get("evidence") or [])
+
+        confidence = _stringify_value(hypothesis.get("confidence")) or "не указано"
+        priority = _stringify_value(hypothesis.get("priority")) or "не указано"
+        st.markdown(f"**Уверенность:** {confidence}")
+        st.markdown(f"**Приоритет:** {priority}")
+
+
+        if debug_mode:
+            with st.expander("DEBUG: raw hypothesis", expanded=False):
+                st.json(hypothesis)
+
+
+def render_progressive_hypotheses(
+    debug_mode: bool,
+    hypotheses=None,
+    start_index: int = 1,
+    parent=None,
+):
+    progressive_hypotheses = (
+        hypotheses if hypotheses is not None else st.session_state.progressive_hypotheses
+    )
+    for index, hypothesis in enumerate(
+        progressive_hypotheses[start_index - 1:],
+        start=start_index,
+    ):
+        render_hypothesis_card(
+            hypothesis,
+            index,
+            debug_mode=debug_mode,
+            parent=parent,
+        )
 
 
 def extract_response_text(response):
@@ -102,11 +288,27 @@ def parse_json_like(value):
     return None
 
 
+def normalize_hypothesis(raw_text):
+    parsed = parse_json_like(raw_text)
+    if isinstance(parsed, dict):
+        return parsed
+    if isinstance(parsed, list) and len(parsed) == 1 and isinstance(parsed[0], dict):
+        return parsed[0]
+    return {"raw_response": raw_text}
+
+
+def serialize_hypotheses(hypotheses):
+    return json.dumps(hypotheses, ensure_ascii=False, indent=2)
+
+
 def split_into_chunks(text: str, chunk_size: int = 12000):
     return [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
 
 
 def render_content(content):
+    if isinstance(content, (dict, list)):
+        st.json(content)
+        return
     parsed = parse_json_like(content)
     if parsed is not None:
         st.json(parsed)
@@ -169,6 +371,11 @@ def clear_generation_results():
         "debug_file_errors",
         "literature_context_length",
         "debug_literature_context_preview",
+        "progressive_hypotheses",
+        "completed_hypothesis_count",
+        "current_hypothesis_index",
+        "progressive_generation_error",
+        "debug_previous_hypotheses",
     ]:
         value = SESSION_DEFAULTS[key]
         st.session_state[key] = value.copy() if isinstance(value, (dict, list)) else value
@@ -199,6 +406,9 @@ def build_literature_entry(file_name, suffix, extracted_text):
 
 
 def render_saved_results():
+    debug_enabled = st.session_state.debug_enabled
+    progressive_hypotheses_container = None
+
     if st.session_state.file_statuses:
         with st.expander("Загруженные файлы и статус чтения", expanded=True):
             for item in st.session_state.file_statuses:
@@ -215,7 +425,14 @@ def render_saved_results():
         render_block("Анализ литературы", st.session_state.literature_analysis)
     if st.session_state.patterns:
         render_block("Паттерны", st.session_state.patterns)
-    if st.session_state.hypotheses:
+    if st.session_state.progressive_hypotheses or st.session_state.is_generating:
+        st.subheader("Гипотезы")
+        progressive_hypotheses_container = st.container()
+        render_progressive_hypotheses(
+            debug_mode=debug_enabled,
+            parent=progressive_hypotheses_container,
+        )
+    elif st.session_state.hypotheses:
         render_block("Гипотезы", st.session_state.hypotheses)
     if st.session_state.critique:
         render_block("Критика", st.session_state.critique)
@@ -223,7 +440,6 @@ def render_saved_results():
         st.subheader("Итоговый отчёт")
         render_hypotheses(st.session_state.final_report)
 
-    debug_enabled = st.session_state.debug_enabled
     debug_panel(debug_enabled, "Итог чтения файлов", st.session_state.file_statuses, expanded=True)
     debug_panel(
         debug_enabled,
@@ -243,11 +459,18 @@ def render_saved_results():
             "completed_stages": st.session_state.completed_stages,
             "stage_outputs_preview": st.session_state.stage_outputs_preview,
             "errors": st.session_state.errors,
+            "progressive_hypotheses": st.session_state.progressive_hypotheses,
+            "completed_hypothesis_count": st.session_state.completed_hypothesis_count,
+            "current_hypothesis_index": st.session_state.current_hypothesis_index,
+            "progressive_generation_error": st.session_state.progressive_generation_error,
+            "previous_hypotheses_history": st.session_state.debug_previous_hypotheses,
         },
         expanded=bool(st.session_state.completed_stages or st.session_state.errors),
     )
     if st.session_state.traceback:
         debug_panel(debug_enabled, "Traceback", st.session_state.traceback, expanded=True)
+
+    return progressive_hypotheses_container
 
 
 def process_uploaded_files(uploaded_files):
@@ -369,7 +592,9 @@ def main():
     kpi_problem = st.text_area("KPI / технологическая проблема", height=150)
     constraints = st.text_area("Ограничения", height=120)
 
-    render_saved_results()
+    saved_results_placeholder = st.empty()
+    with saved_results_placeholder.container():
+        progressive_hypotheses_container = render_saved_results()
 
     st.button(
         "Сгенерировать гипотезы",
@@ -392,6 +617,8 @@ def main():
         st.session_state.is_generating = True
         st.session_state.debug_constraints = constraints.strip()
         st.session_state.debug_file_list = [uploaded_file.name for uploaded_file in uploaded_files]
+        with saved_results_placeholder.container():
+            progressive_hypotheses_container = render_saved_results()
 
         file_results, literature_context = process_uploaded_files(uploaded_files)
         st.session_state.file_statuses = file_results
@@ -408,7 +635,8 @@ def main():
 
         if not literature_context.strip():
             st.session_state.errors = "Нет успешно прочитанных источников"
-            render_saved_results()
+            with saved_results_placeholder.container():
+                render_saved_results()
             st.error("Нет успешно прочитанных источников")
             return
 
@@ -431,14 +659,17 @@ def main():
 
             chunks = split_into_chunks(literature_context, 50000)
             all_results = []
-            progress = st.progress(0)
+            article_progress_placeholder = st.empty()
+            article_progress = article_progress_placeholder.progress(0)
 
             for index, chunk in enumerate(chunks):
                 result = analyze_articles(structured_kpi_text, chunk)
                 text = extract_response_text(result)
                 if text:
                     all_results.append(text)
-                progress.progress((index + 1) / len(chunks))
+                article_progress.progress((index + 1) / len(chunks))
+
+            article_progress_placeholder.empty()
 
             literature_analysis_text = ensure_non_empty(
                 "analyze_articles",
@@ -455,13 +686,68 @@ def main():
             st.session_state.patterns = patterns_text
             persist_stage_output("patterns_text", patterns_text)
 
-            hypotheses = generate_hypothesis(structured_kpi_text, literature_analysis_text, patterns_text)
-            hypotheses_text = ensure_non_empty(
-                "generate_hypothesis",
-                extract_response_text(hypotheses),
-            )
-            st.session_state.hypotheses = hypotheses_text
-            persist_stage_output("generate_hypothesis", hypotheses_text)
+            hypothesis_status_placeholder = st.empty()
+            hypothesis_progress_placeholder = st.empty()
+            hypothesis_progress = hypothesis_progress_placeholder.progress(0.0)
+
+            for hypothesis_index in range(1, TOTAL_HYPOTHESES + 1):
+                st.session_state.current_hypothesis_index = hypothesis_index
+                hypothesis_status_placeholder.text(
+                    f"Генерируется гипотеза {hypothesis_index}/{TOTAL_HYPOTHESES}..."
+                )
+
+                previous_hypotheses_payload = serialize_hypotheses(st.session_state.progressive_hypotheses)
+                st.session_state.debug_previous_hypotheses.append(
+                    {
+                        "hypothesis_index": hypothesis_index,
+                        "previous_hypotheses": previous_hypotheses_payload,
+                    }
+                )
+
+                try:
+                    hypothesis_response = generate_single_hypothesis(
+                        prompt,
+                        constraints.strip(),
+                        literature_context,
+                        structured_kpi_text,
+                        literature_analysis_text,
+                        patterns_text,
+                        previous_hypotheses_payload,
+                        hypothesis_index=hypothesis_index,
+                        total_hypotheses=TOTAL_HYPOTHESES,
+                    )
+                    hypothesis_text = ensure_non_empty(
+                        f"generate_single_hypothesis_{hypothesis_index}",
+                        extract_response_text(hypothesis_response),
+                    )
+                except Exception as exc:
+                    st.session_state.progressive_generation_error = (
+                        f"Ошибка при генерации гипотезы {hypothesis_index}"
+                    )
+                    raise RuntimeError(
+                        f"{st.session_state.progressive_generation_error}: {exc}"
+                    ) from exc
+
+                st.session_state.progressive_hypotheses.append(normalize_hypothesis(hypothesis_text))
+                st.session_state.completed_hypothesis_count = len(st.session_state.progressive_hypotheses)
+                st.session_state.hypotheses = serialize_hypotheses(st.session_state.progressive_hypotheses)
+                persist_stage_output("generate_hypothesis", st.session_state.hypotheses)
+
+                hypothesis_progress.progress(
+                    st.session_state.completed_hypothesis_count / TOTAL_HYPOTHESES
+                )
+                if progressive_hypotheses_container is None:
+                    with saved_results_placeholder.container():
+                        progressive_hypotheses_container = render_saved_results()
+                render_progressive_hypotheses(
+                    debug_mode=st.session_state.debug_enabled,
+                    hypotheses=st.session_state.progressive_hypotheses,
+                    start_index=st.session_state.completed_hypothesis_count,
+                    parent=progressive_hypotheses_container,
+                )
+
+            hypothesis_status_placeholder.text("Генерация гипотез завершена. Выполняется рецензирование...")
+            hypotheses_text = st.session_state.hypotheses
 
             critique = review(hypotheses_text, prompt)
             critique_text = ensure_non_empty(
@@ -478,15 +764,19 @@ def main():
             )
             st.session_state.final_report = final_output_text
             persist_stage_output("explain", final_output_text)
+            with saved_results_placeholder.container():
+                render_saved_results()
+            hypothesis_status_placeholder.empty()
+            hypothesis_progress_placeholder.empty()
             st.session_state.errors = ""
             st.session_state.traceback = ""
     except Exception as exc:
-        st.session_state.errors = str(exc)
+        st.session_state.errors = st.session_state.progressive_generation_error or str(exc)
         st.session_state.traceback = traceback.format_exc()
-        render_saved_results()
+        with saved_results_placeholder.container():
+            render_saved_results()
         st.error(
-            "Ошибка при обращении к модели или обработке данных. "
-            f"Подробности: {exc}"
+            f"{st.session_state.errors}. Подробности: {exc}"
         )
         return
     finally:
@@ -499,7 +789,8 @@ def main():
         if should_rerun:
             st.rerun()
 
-    render_saved_results()
+    with saved_results_placeholder.container():
+        render_saved_results()
 
 
 if __name__ == "__main__":
