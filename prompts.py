@@ -174,6 +174,21 @@ HYPOTHESIS_SYSTEM = """
 
 """
 
+HYPOTHESIS_SYSTEM = HYPOTHESIS_SYSTEM + """
+
+Generate exactly 5 hypotheses. No fewer and no more.
+If the sources contain only a few strong ideas, still return exactly 5 hypotheses:
+- 3-4 strong or practical hypotheses;
+- 1-2 weaker or riskier hypotheses, clearly marked as low_priority or needs_revision.
+Do not silently reduce the number of hypotheses because of constraints.
+If a hypothesis conflicts with constraints, include it anyway and mark it as risky, low_priority, or needs_revision so the critic can evaluate it.
+Add a field named "priority" for every hypothesis and use one of:
+- strong
+- practical
+- low_priority
+- needs_revision
+"""
+
 REVIEW_SYSTEM = """
 Ты научный рецензент.
 
@@ -220,6 +235,17 @@ REVIEW_SYSTEM = """
 }
 """
 
+REVIEW_SYSTEM = REVIEW_SYSTEM + """
+
+Evaluate all 5 hypotheses.
+Do not remove hypotheses from the list.
+If a hypothesis is weak, assign a low rating and set recommendation: reject.
+Include a "recommendation" field for each ranked hypothesis and use one of:
+- accept
+- revise
+- reject
+"""
+
 REPORT_SYSTEM = """
 Ты готовишь отчет для исследовательской группы.
 
@@ -240,6 +266,12 @@ REPORT_SYSTEM = """
 Пиши техническим языком.
 
 Не выдумывай источники.
+"""
+
+REPORT_SYSTEM = REPORT_SYSTEM + """
+
+Show all 5 hypotheses in the final report.
+Low-rated hypotheses may be marked as "не рекомендовано", but do not remove them from the report.
 """
 
 HYPOTHESIS_GRAPH_SYSTEM = """

@@ -30,6 +30,7 @@ SESSION_DEFAULTS = {
     "debug_constraints": "",
     "debug_file_list": [],
     "debug_file_text_lengths": {},
+    "debug_file_errors": {},
     "literature_context_length": 0,
     "debug_literature_context_preview": "",
     "is_generating": False,
@@ -165,6 +166,7 @@ def clear_generation_results():
         "debug_constraints",
         "debug_file_list",
         "debug_file_text_lengths",
+        "debug_file_errors",
         "literature_context_length",
         "debug_literature_context_preview",
     ]:
@@ -187,14 +189,25 @@ def persist_stage_output(stage_key, value):
     }
 
 
+def build_literature_entry(file_name, suffix, extracted_text):
+    if suffix in {".xlsx", ".xls"}:
+        return extracted_text.replace(
+            "=== SHEET: ",
+            f"=== FILE: {file_name} / SHEET: ",
+        )
+    return f"=== FILE: {file_name} ===\n{extracted_text}"
+
+
 def render_saved_results():
     if st.session_state.file_statuses:
         with st.expander("Загруженные файлы и статус чтения", expanded=True):
             for item in st.session_state.file_statuses:
                 st.write(
-                    f"{item['name']} | {item['type']} | {item['message']} | "
+                    f"{item['name']} | {item['extension']} | {item['status_label']} | "
                     f"объём текста: {item['text_length']}"
                 )
+                if item["message"]:
+                    st.caption(item["message"])
 
     if st.session_state.structured_kpi:
         render_block("Структурированный KPI", st.session_state.structured_kpi)
@@ -225,6 +238,7 @@ def render_saved_results():
             "constraints": st.session_state.debug_constraints,
             "file_list": st.session_state.debug_file_list,
             "file_text_lengths": st.session_state.debug_file_text_lengths,
+            "file_errors": st.session_state.debug_file_errors,
             "literature_context_length": st.session_state.literature_context_length,
             "completed_stages": st.session_state.completed_stages,
             "stage_outputs_preview": st.session_state.stage_outputs_preview,
@@ -248,8 +262,9 @@ def process_uploaded_files(uploaded_files):
             results.append(
                 {
                     "name": uploaded_file.name,
-                    "type": suffix or "unknown",
+                    "extension": suffix or "unknown",
                     "status": "error",
+                    "status_label": "Ошибка чтения",
                     "message": "Неподдерживаемый тип файла.",
                     "text_length": 0,
                 }
@@ -266,13 +281,14 @@ def process_uploaded_files(uploaded_files):
             extracted_text = extracted_text.strip()
 
             if extracted_text:
-                literature_parts.append(f"=== FILE: {uploaded_file.name} ===\n{extracted_text}")
+                literature_parts.append(build_literature_entry(uploaded_file.name, suffix, extracted_text))
                 results.append(
                     {
                         "name": uploaded_file.name,
-                        "type": suffix,
+                        "extension": suffix,
                         "status": "success",
-                        "message": "Успешно прочитан",
+                        "status_label": "Успешно прочитан",
+                        "message": "",
                         "text_length": len(extracted_text),
                     }
                 )
@@ -280,8 +296,9 @@ def process_uploaded_files(uploaded_files):
                 results.append(
                     {
                         "name": uploaded_file.name,
-                        "type": suffix,
+                        "extension": suffix,
                         "status": "error",
+                        "status_label": "Ошибка чтения",
                         "message": "Файл прочитан, но извлечённый текст пуст.",
                         "text_length": 0,
                     }
@@ -290,8 +307,9 @@ def process_uploaded_files(uploaded_files):
             results.append(
                 {
                     "name": uploaded_file.name,
-                    "type": suffix,
+                    "extension": suffix,
                     "status": "error",
+                    "status_label": "Ошибка чтения",
                     "message": str(exc),
                     "text_length": 0,
                 }
@@ -380,13 +398,18 @@ def main():
         st.session_state.debug_file_text_lengths = {
             item["name"]: item["text_length"] for item in file_results
         }
+        st.session_state.debug_file_errors = {
+            item["name"]: item["message"]
+            for item in file_results
+            if item["status"] == "error" and item["message"]
+        }
         st.session_state.literature_context_length = len(literature_context)
         st.session_state.debug_literature_context_preview = preview_text(literature_context)
 
         if not literature_context.strip():
-            st.session_state.errors = "Не удалось прочитать ни один файл."
+            st.session_state.errors = "Нет успешно прочитанных источников"
             render_saved_results()
-            st.error("Не удалось прочитать ни один файл. Пайплайн не был запущен.")
+            st.error("Нет успешно прочитанных источников")
             return
 
         prompt = f"{kpi_problem.strip()}\n\nОграничения:\n{constraints.strip()}".strip()
