@@ -7,11 +7,20 @@ from pathlib import Path
 
 import streamlit as st
 
-from pipeline import analyze_articles, analyze_kpi, explain, find_patterns, generate_hypothesis, review
+from pipeline import (
+    analyze_articles,
+    analyze_kpi,
+    explain,
+    find_patterns,
+    generate_hypothesis,
+    generate_single_hypothesis,
+    review,
+)
 from reader import read_file
 
 
 SUPPORTED_EXTENSIONS = {".pdf", ".xlsx", ".xls"}
+TOTAL_HYPOTHESES = 5
 DEFAULT_DEBUG = os.getenv("STREAMLIT_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
 SESSION_DEFAULTS = {
     "debug_enabled": DEFAULT_DEBUG,
@@ -33,6 +42,11 @@ SESSION_DEFAULTS = {
     "debug_file_errors": {},
     "literature_context_length": 0,
     "debug_literature_context_preview": "",
+    "progressive_hypotheses": [],
+    "completed_hypothesis_count": 0,
+    "current_hypothesis_index": 0,
+    "progressive_generation_error": "",
+    "debug_previous_hypotheses": [],
     "is_generating": False,
     "generation_requested": False,
 }
@@ -57,6 +71,12 @@ def render_hypotheses(text: str):
 
         with st.expander(title, expanded=False):
             st.markdown(part)
+
+
+def render_progressive_hypotheses(hypotheses):
+    for index, hypothesis in enumerate(hypotheses, start=1):
+        with st.expander(f"Гипотеза {index}", expanded=False):
+            render_content(hypothesis)
 
 
 def extract_response_text(response):
@@ -102,11 +122,27 @@ def parse_json_like(value):
     return None
 
 
+def normalize_hypothesis(raw_text):
+    parsed = parse_json_like(raw_text)
+    if isinstance(parsed, dict):
+        return parsed
+    if isinstance(parsed, list) and len(parsed) == 1 and isinstance(parsed[0], dict):
+        return parsed[0]
+    return {"raw_response": raw_text}
+
+
+def serialize_hypotheses(hypotheses):
+    return json.dumps(hypotheses, ensure_ascii=False, indent=2)
+
+
 def split_into_chunks(text: str, chunk_size: int = 12000):
     return [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
 
 
 def render_content(content):
+    if isinstance(content, (dict, list)):
+        st.json(content)
+        return
     parsed = parse_json_like(content)
     if parsed is not None:
         st.json(parsed)
@@ -169,6 +205,11 @@ def clear_generation_results():
         "debug_file_errors",
         "literature_context_length",
         "debug_literature_context_preview",
+        "progressive_hypotheses",
+        "completed_hypothesis_count",
+        "current_hypothesis_index",
+        "progressive_generation_error",
+        "debug_previous_hypotheses",
     ]:
         value = SESSION_DEFAULTS[key]
         st.session_state[key] = value.copy() if isinstance(value, (dict, list)) else value
@@ -215,7 +256,10 @@ def render_saved_results():
         render_block("Анализ литературы", st.session_state.literature_analysis)
     if st.session_state.patterns:
         render_block("Паттерны", st.session_state.patterns)
-    if st.session_state.hypotheses:
+    if st.session_state.progressive_hypotheses:
+        st.subheader("Гипотезы")
+        render_progressive_hypotheses(st.session_state.progressive_hypotheses)
+    elif st.session_state.hypotheses:
         render_block("Гипотезы", st.session_state.hypotheses)
     if st.session_state.critique:
         render_block("Критика", st.session_state.critique)
@@ -243,6 +287,11 @@ def render_saved_results():
             "completed_stages": st.session_state.completed_stages,
             "stage_outputs_preview": st.session_state.stage_outputs_preview,
             "errors": st.session_state.errors,
+            "progressive_hypotheses": st.session_state.progressive_hypotheses,
+            "completed_hypothesis_count": st.session_state.completed_hypothesis_count,
+            "current_hypothesis_index": st.session_state.current_hypothesis_index,
+            "progressive_generation_error": st.session_state.progressive_generation_error,
+            "previous_hypotheses_history": st.session_state.debug_previous_hypotheses,
         },
         expanded=bool(st.session_state.completed_stages or st.session_state.errors),
     )
@@ -431,14 +480,17 @@ def main():
 
             chunks = split_into_chunks(literature_context, 50000)
             all_results = []
-            progress = st.progress(0)
+            article_progress_placeholder = st.empty()
+            article_progress = article_progress_placeholder.progress(0)
 
             for index, chunk in enumerate(chunks):
                 result = analyze_articles(structured_kpi_text, chunk)
                 text = extract_response_text(result)
                 if text:
                     all_results.append(text)
-                progress.progress((index + 1) / len(chunks))
+                article_progress.progress((index + 1) / len(chunks))
+
+            article_progress_placeholder.empty()
 
             literature_analysis_text = ensure_non_empty(
                 "analyze_articles",
@@ -455,13 +507,62 @@ def main():
             st.session_state.patterns = patterns_text
             persist_stage_output("patterns_text", patterns_text)
 
-            hypotheses = generate_hypothesis(structured_kpi_text, literature_analysis_text, patterns_text)
-            hypotheses_text = ensure_non_empty(
-                "generate_hypothesis",
-                extract_response_text(hypotheses),
-            )
-            st.session_state.hypotheses = hypotheses_text
-            persist_stage_output("generate_hypothesis", hypotheses_text)
+            hypothesis_status_placeholder = st.empty()
+            hypothesis_progress_placeholder = st.empty()
+            progressive_hypotheses_placeholder = st.empty()
+            hypothesis_progress = hypothesis_progress_placeholder.progress(0.0)
+
+            for hypothesis_index in range(1, TOTAL_HYPOTHESES + 1):
+                st.session_state.current_hypothesis_index = hypothesis_index
+                hypothesis_status_placeholder.text(
+                    f"Генерируется гипотеза {hypothesis_index}/{TOTAL_HYPOTHESES}..."
+                )
+
+                previous_hypotheses_payload = serialize_hypotheses(st.session_state.progressive_hypotheses)
+                st.session_state.debug_previous_hypotheses.append(
+                    {
+                        "hypothesis_index": hypothesis_index,
+                        "previous_hypotheses": previous_hypotheses_payload,
+                    }
+                )
+
+                try:
+                    hypothesis_response = generate_single_hypothesis(
+                        prompt,
+                        constraints.strip(),
+                        literature_context,
+                        structured_kpi_text,
+                        literature_analysis_text,
+                        patterns_text,
+                        previous_hypotheses_payload,
+                        hypothesis_index=hypothesis_index,
+                        total_hypotheses=TOTAL_HYPOTHESES,
+                    )
+                    hypothesis_text = ensure_non_empty(
+                        f"generate_single_hypothesis_{hypothesis_index}",
+                        extract_response_text(hypothesis_response),
+                    )
+                except Exception as exc:
+                    st.session_state.progressive_generation_error = (
+                        f"Ошибка при генерации гипотезы {hypothesis_index}"
+                    )
+                    raise RuntimeError(
+                        f"{st.session_state.progressive_generation_error}: {exc}"
+                    ) from exc
+
+                st.session_state.progressive_hypotheses.append(normalize_hypothesis(hypothesis_text))
+                st.session_state.completed_hypothesis_count = len(st.session_state.progressive_hypotheses)
+                st.session_state.hypotheses = serialize_hypotheses(st.session_state.progressive_hypotheses)
+                persist_stage_output("generate_hypothesis", st.session_state.hypotheses)
+
+                hypothesis_progress.progress(
+                    st.session_state.completed_hypothesis_count / TOTAL_HYPOTHESES
+                )
+                with progressive_hypotheses_placeholder.container():
+                    render_progressive_hypotheses(st.session_state.progressive_hypotheses)
+
+            hypothesis_status_placeholder.text("Генерация гипотез завершена. Выполняется рецензирование...")
+            hypotheses_text = st.session_state.hypotheses
 
             critique = review(hypotheses_text, prompt)
             critique_text = ensure_non_empty(
@@ -478,15 +579,16 @@ def main():
             )
             st.session_state.final_report = final_output_text
             persist_stage_output("explain", final_output_text)
+            hypothesis_status_placeholder.empty()
+            hypothesis_progress_placeholder.empty()
             st.session_state.errors = ""
             st.session_state.traceback = ""
     except Exception as exc:
-        st.session_state.errors = str(exc)
+        st.session_state.errors = st.session_state.progressive_generation_error or str(exc)
         st.session_state.traceback = traceback.format_exc()
         render_saved_results()
         st.error(
-            "Ошибка при обращении к модели или обработке данных. "
-            f"Подробности: {exc}"
+            f"{st.session_state.errors}. Подробности: {exc}"
         )
         return
     finally:
