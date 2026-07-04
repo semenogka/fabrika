@@ -142,11 +142,36 @@ def _render_evidence_list(evidence):
         st.markdown("- не указано")
 
 
-def render_hypothesis_card(hypothesis: dict, index: int):
-    title = _stringify_value(hypothesis.get("title")) or "не указано"
+def clean_hypothesis_title(title: str, index: int) -> str:
+    cleaned = _stringify_value(title)
+    if not cleaned:
+        return "не указано"
 
-    with st.container(border=True):
-        st.markdown(f"### Гипотеза {index}: {title}")
+    cleaned = re.sub(
+        rf"^\s*гипотеза\s*{index}\s*:\s*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    ).strip()
+    cleaned = re.sub(
+        r"^\s*гипотеза\s*\d+\s*:\s*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    prefix, separator, remainder = cleaned.partition(":")
+    if separator and remainder.strip() and str(index) in prefix:
+        cleaned = remainder.strip()
+
+    return cleaned or "не указано"
+
+
+def render_hypothesis_card(hypothesis: dict, index: int, debug_mode: bool = False):
+    clean_title = clean_hypothesis_title(hypothesis.get("title"), index)
+    label = f"Гипотеза {index}: {clean_title}"
+
+    with st.expander(label, expanded=False):
 
         description = _stringify_value(hypothesis.get("description"))
         if description:
@@ -188,12 +213,14 @@ def render_hypothesis_card(hypothesis: dict, index: int):
         st.markdown(f"**Приоритет:** {priority}")
 
 
-def render_progressive_hypotheses(hypotheses, debug_enabled=False):
-    for index, hypothesis in enumerate(hypotheses, start=1):
-        render_hypothesis_card(hypothesis, index)
-        if debug_enabled:
+        if debug_mode:
             with st.expander("DEBUG: raw hypothesis", expanded=False):
                 st.json(hypothesis)
+
+
+def render_progressive_hypotheses(debug_mode: bool):
+    for index, hypothesis in enumerate(st.session_state.progressive_hypotheses, start=1):
+        render_hypothesis_card(hypothesis, index, debug_mode=debug_mode)
 
 
 def extract_response_text(response):
@@ -375,12 +402,9 @@ def render_saved_results():
         render_block("Анализ литературы", st.session_state.literature_analysis)
     if st.session_state.patterns:
         render_block("Паттерны", st.session_state.patterns)
-    if st.session_state.progressive_hypotheses:
+    if st.session_state.progressive_hypotheses or st.session_state.is_generating:
         st.subheader("Гипотезы")
-        render_progressive_hypotheses(
-            st.session_state.progressive_hypotheses,
-            debug_enabled=debug_enabled,
-        )
+        render_progressive_hypotheses(debug_mode=debug_enabled)
     elif st.session_state.hypotheses:
         render_block("Гипотезы", st.session_state.hypotheses)
     if st.session_state.critique:
@@ -564,6 +588,8 @@ def main():
         st.session_state.is_generating = True
         st.session_state.debug_constraints = constraints.strip()
         st.session_state.debug_file_list = [uploaded_file.name for uploaded_file in uploaded_files]
+        with saved_results_placeholder.container():
+            render_saved_results()
 
         file_results, literature_context = process_uploaded_files(uploaded_files)
         st.session_state.file_statuses = file_results
