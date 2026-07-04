@@ -167,11 +167,17 @@ def clean_hypothesis_title(title: str, index: int) -> str:
     return cleaned or "не указано"
 
 
-def render_hypothesis_card(hypothesis: dict, index: int, debug_mode: bool = False):
+def render_hypothesis_card(
+    hypothesis: dict,
+    index: int,
+    debug_mode: bool = False,
+    parent=None,
+):
     clean_title = clean_hypothesis_title(hypothesis.get("title"), index)
     label = f"Гипотеза {index}: {clean_title}"
 
-    with st.expander(label, expanded=False):
+    expander_host = parent if parent is not None else st
+    with expander_host.expander(label, expanded=False):
 
         description = _stringify_value(hypothesis.get("description"))
         if description:
@@ -218,9 +224,25 @@ def render_hypothesis_card(hypothesis: dict, index: int, debug_mode: bool = Fals
                 st.json(hypothesis)
 
 
-def render_progressive_hypotheses(debug_mode: bool):
-    for index, hypothesis in enumerate(st.session_state.progressive_hypotheses, start=1):
-        render_hypothesis_card(hypothesis, index, debug_mode=debug_mode)
+def render_progressive_hypotheses(
+    debug_mode: bool,
+    hypotheses=None,
+    start_index: int = 1,
+    parent=None,
+):
+    progressive_hypotheses = (
+        hypotheses if hypotheses is not None else st.session_state.progressive_hypotheses
+    )
+    for index, hypothesis in enumerate(
+        progressive_hypotheses[start_index - 1:],
+        start=start_index,
+    ):
+        render_hypothesis_card(
+            hypothesis,
+            index,
+            debug_mode=debug_mode,
+            parent=parent,
+        )
 
 
 def extract_response_text(response):
@@ -385,6 +407,7 @@ def build_literature_entry(file_name, suffix, extracted_text):
 
 def render_saved_results():
     debug_enabled = st.session_state.debug_enabled
+    progressive_hypotheses_container = None
 
     if st.session_state.file_statuses:
         with st.expander("Загруженные файлы и статус чтения", expanded=True):
@@ -404,7 +427,11 @@ def render_saved_results():
         render_block("Паттерны", st.session_state.patterns)
     if st.session_state.progressive_hypotheses or st.session_state.is_generating:
         st.subheader("Гипотезы")
-        render_progressive_hypotheses(debug_mode=debug_enabled)
+        progressive_hypotheses_container = st.container()
+        render_progressive_hypotheses(
+            debug_mode=debug_enabled,
+            parent=progressive_hypotheses_container,
+        )
     elif st.session_state.hypotheses:
         render_block("Гипотезы", st.session_state.hypotheses)
     if st.session_state.critique:
@@ -442,6 +469,8 @@ def render_saved_results():
     )
     if st.session_state.traceback:
         debug_panel(debug_enabled, "Traceback", st.session_state.traceback, expanded=True)
+
+    return progressive_hypotheses_container
 
 
 def process_uploaded_files(uploaded_files):
@@ -565,7 +594,7 @@ def main():
 
     saved_results_placeholder = st.empty()
     with saved_results_placeholder.container():
-        render_saved_results()
+        progressive_hypotheses_container = render_saved_results()
 
     st.button(
         "Сгенерировать гипотезы",
@@ -589,7 +618,7 @@ def main():
         st.session_state.debug_constraints = constraints.strip()
         st.session_state.debug_file_list = [uploaded_file.name for uploaded_file in uploaded_files]
         with saved_results_placeholder.container():
-            render_saved_results()
+            progressive_hypotheses_container = render_saved_results()
 
         file_results, literature_context = process_uploaded_files(uploaded_files)
         st.session_state.file_statuses = file_results
@@ -707,8 +736,15 @@ def main():
                 hypothesis_progress.progress(
                     st.session_state.completed_hypothesis_count / TOTAL_HYPOTHESES
                 )
-                with saved_results_placeholder.container():
-                    render_saved_results()
+                if progressive_hypotheses_container is None:
+                    with saved_results_placeholder.container():
+                        progressive_hypotheses_container = render_saved_results()
+                render_progressive_hypotheses(
+                    debug_mode=st.session_state.debug_enabled,
+                    hypotheses=st.session_state.progressive_hypotheses,
+                    start_index=st.session_state.completed_hypothesis_count,
+                    parent=progressive_hypotheses_container,
+                )
 
             hypothesis_status_placeholder.text("Генерация гипотез завершена. Выполняется рецензирование...")
             hypotheses_text = st.session_state.hypotheses
