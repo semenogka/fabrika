@@ -3,6 +3,7 @@ import os
 import re
 import tempfile
 import traceback
+from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
@@ -17,6 +18,7 @@ from pipeline import (
     review,
 )
 from reader import read_file
+from report_export import build_report_pdf, should_enable_pdf_download
 
 
 SUPPORTED_EXTENSIONS = {".pdf", ".xlsx", ".xls"}
@@ -47,6 +49,9 @@ SESSION_DEFAULTS = {
     "current_hypothesis_index": 0,
     "progressive_generation_error": "",
     "debug_previous_hypotheses": [],
+    "kpi_problem_text": "",
+    "constraints_text": "",
+    "generation_completed_at": "",
     "is_generating": False,
     "generation_requested": False,
 }
@@ -376,6 +381,7 @@ def clear_generation_results():
         "current_hypothesis_index",
         "progressive_generation_error",
         "debug_previous_hypotheses",
+        "generation_completed_at",
     ]:
         value = SESSION_DEFAULTS[key]
         st.session_state[key] = value.copy() if isinstance(value, (dict, list)) else value
@@ -439,6 +445,23 @@ def render_saved_results():
     if st.session_state.final_report:
         st.subheader("Итоговый отчёт")
         render_hypotheses(st.session_state.final_report)
+
+    if should_enable_pdf_download(st.session_state):
+        try:
+            pdf_bytes = build_report_pdf(
+                st.session_state,
+                st.session_state.kpi_problem_text,
+                st.session_state.constraints_text,
+            )
+        except Exception as exc:
+            st.warning(f"Не удалось подготовить PDF-отчёт: {exc}")
+        else:
+            st.download_button(
+                label="Скачать отчёт PDF",
+                data=pdf_bytes,
+                file_name=f"hypothesis_report_{datetime.now():%Y%m%d_%H%M%S}.pdf",
+                mime="application/pdf",
+            )
 
     debug_panel(debug_enabled, "Итог чтения файлов", st.session_state.file_statuses, expanded=True)
     debug_panel(
@@ -591,6 +614,8 @@ def main():
     )
     kpi_problem = st.text_area("KPI / технологическая проблема", height=150)
     constraints = st.text_area("Ограничения", height=120)
+    st.session_state.kpi_problem_text = kpi_problem.strip()
+    st.session_state.constraints_text = constraints.strip()
 
     saved_results_placeholder = st.empty()
     with saved_results_placeholder.container():
@@ -615,6 +640,8 @@ def main():
 
         clear_generation_results()
         st.session_state.is_generating = True
+        st.session_state.kpi_problem_text = kpi_problem.strip()
+        st.session_state.constraints_text = constraints.strip()
         st.session_state.debug_constraints = constraints.strip()
         st.session_state.debug_file_list = [uploaded_file.name for uploaded_file in uploaded_files]
         with saved_results_placeholder.container():
@@ -730,6 +757,8 @@ def main():
 
                 st.session_state.progressive_hypotheses.append(normalize_hypothesis(hypothesis_text))
                 st.session_state.completed_hypothesis_count = len(st.session_state.progressive_hypotheses)
+                if st.session_state.completed_hypothesis_count == TOTAL_HYPOTHESES:
+                    st.session_state.generation_completed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 st.session_state.hypotheses = serialize_hypotheses(st.session_state.progressive_hypotheses)
                 persist_stage_output("generate_hypothesis", st.session_state.hypotheses)
 
@@ -763,6 +792,7 @@ def main():
                 extract_response_text(final_output),
             )
             st.session_state.final_report = final_output_text
+            st.session_state.generation_completed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             persist_stage_output("explain", final_output_text)
             with saved_results_placeholder.container():
                 render_saved_results()
