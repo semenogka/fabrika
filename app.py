@@ -17,6 +17,7 @@ from pipeline import (
     review,
 )
 from reader import read_file
+from report_export import build_report_pdf, should_enable_pdf_download
 
 
 SUPPORTED_EXTENSIONS = {".pdf", ".xlsx", ".xls"}
@@ -473,6 +474,37 @@ def render_saved_results():
     return progressive_hypotheses_container
 
 
+def render_pdf_download(kpi_problem: str = "", constraints: str = ""):
+    progressive_hypotheses = st.session_state.get("progressive_hypotheses", [])
+    pdf_ready = (
+        should_enable_pdf_download(st.session_state)
+        or len(progressive_hypotheses) >= TOTAL_HYPOTHESES
+    )
+    if not pdf_ready:
+        return
+
+    kpi_text = st.session_state.get("kpi_problem_text") or kpi_problem.strip()
+    constraints_text = st.session_state.get("constraints_text") or constraints.strip()
+
+    try:
+        pdf_bytes = build_report_pdf(
+            st.session_state,
+            kpi_text,
+            constraints_text,
+        )
+    except Exception as exc:
+        st.warning(f"Не удалось подготовить PDF-отчёт: {exc}")
+        return
+
+    st.download_button(
+        "Скачать отчёт PDF",
+        data=pdf_bytes,
+        file_name="hypothesis_report.pdf",
+        mime="application/pdf",
+        key="download_report_pdf",
+    )
+
+
 def process_uploaded_files(uploaded_files):
     results = []
     literature_parts = []
@@ -595,6 +627,7 @@ def main():
     saved_results_placeholder = st.empty()
     with saved_results_placeholder.container():
         progressive_hypotheses_container = render_saved_results()
+    render_pdf_download(kpi_problem, constraints)
 
     st.button(
         "Сгенерировать гипотезы",
