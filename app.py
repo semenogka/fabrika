@@ -18,7 +18,7 @@ from pipeline import (
     review,
 )
 from reader import read_file
-from report_export import build_report_pdf, should_enable_pdf_download
+from report_export import build_report_pdf
 
 
 SUPPORTED_EXTENSIONS = {".pdf", ".xlsx", ".xls"}
@@ -394,6 +394,51 @@ def start_generation():
     st.session_state.generation_requested = True
 
 
+def persist_context_inputs(kpi_problem: str, constraints: str):
+    kpi_text = kpi_problem.strip()
+    constraints_text = constraints.strip()
+
+    if kpi_text:
+        st.session_state.kpi_problem_text = kpi_text
+    if constraints_text:
+        st.session_state.constraints_text = constraints_text
+
+
+def has_ready_report_results() -> bool:
+    return bool(
+        st.session_state.final_report
+        or len(st.session_state.progressive_hypotheses) == TOTAL_HYPOTHESES
+    )
+
+
+def render_pdf_download():
+    if st.session_state.is_generating or not has_ready_report_results():
+        return
+
+    completed_at = st.session_state.generation_completed_at or datetime.now().strftime(
+        "%Y-%m-%d_%H-%M-%S"
+    )
+    safe_timestamp = re.sub(r"[^0-9A-Za-z_-]", "_", completed_at)
+
+    try:
+        pdf_bytes = build_report_pdf(
+            st.session_state,
+            st.session_state.kpi_problem_text,
+            st.session_state.constraints_text,
+        )
+    except Exception as exc:
+        st.warning(f"Не удалось подготовить PDF-отчёт: {exc}")
+        return
+
+    st.download_button(
+        label="Скачать отчёт PDF",
+        data=pdf_bytes,
+        file_name=f"hypothesis_report_{safe_timestamp}.pdf",
+        mime="application/pdf",
+        key="download_report_pdf",
+    )
+
+
 def persist_stage_output(stage_key, value):
     st.session_state.completed_stages = list(dict.fromkeys([*st.session_state.completed_stages, stage_key]))
     st.session_state.stage_outputs_preview[stage_key] = {
@@ -445,23 +490,6 @@ def render_saved_results():
     if st.session_state.final_report:
         st.subheader("Итоговый отчёт")
         render_hypotheses(st.session_state.final_report)
-
-    if should_enable_pdf_download(st.session_state):
-        try:
-            pdf_bytes = build_report_pdf(
-                st.session_state,
-                st.session_state.kpi_problem_text,
-                st.session_state.constraints_text,
-            )
-        except Exception as exc:
-            st.warning(f"Не удалось подготовить PDF-отчёт: {exc}")
-        else:
-            st.download_button(
-                label="Скачать отчёт PDF",
-                data=pdf_bytes,
-                file_name=f"hypothesis_report_{datetime.now():%Y%m%d_%H%M%S}.pdf",
-                mime="application/pdf",
-            )
 
     debug_panel(debug_enabled, "Итог чтения файлов", st.session_state.file_statuses, expanded=True)
     debug_panel(
@@ -614,8 +642,7 @@ def main():
     )
     kpi_problem = st.text_area("KPI / технологическая проблема", height=150)
     constraints = st.text_area("Ограничения", height=120)
-    st.session_state.kpi_problem_text = kpi_problem.strip()
-    st.session_state.constraints_text = constraints.strip()
+    persist_context_inputs(kpi_problem, constraints)
 
     saved_results_placeholder = st.empty()
     with saved_results_placeholder.container():
@@ -629,6 +656,7 @@ def main():
     )
 
     if not st.session_state.get("generation_requested", False):
+        render_pdf_download()
         return
 
     try:
@@ -640,8 +668,7 @@ def main():
 
         clear_generation_results()
         st.session_state.is_generating = True
-        st.session_state.kpi_problem_text = kpi_problem.strip()
-        st.session_state.constraints_text = constraints.strip()
+        persist_context_inputs(kpi_problem, constraints)
         st.session_state.debug_constraints = constraints.strip()
         st.session_state.debug_file_list = [uploaded_file.name for uploaded_file in uploaded_files]
         with saved_results_placeholder.container():
@@ -821,6 +848,7 @@ def main():
 
     with saved_results_placeholder.container():
         render_saved_results()
+    render_pdf_download()
 
 
 if __name__ == "__main__":
